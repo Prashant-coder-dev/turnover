@@ -4,6 +4,7 @@ import httpx
 
 app = FastAPI()
 
+# CORS settings
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Restrict later if needed
@@ -12,12 +13,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-NEPSE_API_URL = "https://tms59.nepsetms.com.np/tmsapi/rtApi/admin/vCache/marketTurnover"
+# API URLs
+NEPSELYTICS_URL = "https://nepselytics-6d61dea19f30.herokuapp.com/api/nepselytics/homepage"
+NEPSE_TURNOVER_URL = "https://tms59.nepsetms.com.np/tmsapi/rtApi/admin/vCache/marketTurnover"
 
+# Root endpoint
 @app.get("/")
 def root():
-    return {"status": "NEPSE Proxy Running"}
+    return {"status": "NEPSE Data API Running"}
 
+# -------------------------------
+# Nepselytics Homepage Data
+# -------------------------------
+@app.get("/homepage-data")
+async def homepage_data():
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(NEPSELYTICS_URL)
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail="Failed to fetch homepage market data"
+        )
+
+    return resp.json()
+
+# -------------------------------
+# Market Turnover (NEPSE Proxy)
+# -------------------------------
 @app.get("/market-turnover")
 async def market_turnover():
     headers = {
@@ -26,12 +49,13 @@ async def market_turnover():
     }
 
     async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(NEPSE_API_URL, headers=headers)
+        resp = await client.get(NEPSE_TURNOVER_URL, headers=headers)
 
     if resp.status_code != 200:
         raise HTTPException(
             status_code=resp.status_code,
-            detail="Failed to fetch NEPSE data"
+            detail="Failed to fetch NEPSE market turnover"
         )
 
     return resp.json()
+
