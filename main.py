@@ -73,20 +73,15 @@ async def market_turnover():
 # --------------------------------------------------
 @app.get("/floorsheet")
 async def floorsheet(
-    page: int = Query(0, ge=0, description="Page number (0-indexed)"),
-    size: int = Query(500, ge=1, le=500, description="Records per request (max 500)"),
+    page: int = Query(0, ge=0),
+    size: int = Query(10, ge=1, le=500),
     order: str = Query("desc", regex="^(asc|desc)$")
 ):
-    """
-    Floorsheet proxy with merged pagination.
-
-    Nepselytics internally limits data to ~100 rows per request.
-    This endpoint transparently fetches multiple pages and merges them.
-    """
-
     PAGE_LIMIT = 100
-    pages_required = math.ceil(size / PAGE_LIMIT)
-    all_records = []
+    pages_required = (size + PAGE_LIMIT - 1) // PAGE_LIMIT
+
+    all_content = []
+    base_meta = None
 
     async with httpx.AsyncClient(timeout=30) as client:
         for i in range(pages_required):
@@ -94,7 +89,7 @@ async def floorsheet(
 
             params = {
                 "page": current_page,
-                "Size": PAGE_LIMIT,   # API expects capital S
+                "Size": min(PAGE_LIMIT, size),
                 "order": order
             }
 
@@ -107,32 +102,41 @@ async def floorsheet(
             if resp.status_code != 200:
                 raise HTTPException(
                     resp.status_code,
-                    f"Floorsheet fetch failed at page {current_page}"
+                    f"Failed to fetch floorsheet page {current_page}"
                 )
 
             payload = resp.json()
+            data = payload.get("data")
 
-            # Nepselytics response structure
-            if not isinstance(payload, dict):
+            if not data or not data.get("content"):
                 break
 
-            content = payload.get("data", {}).get("content", [])
-            if not content:
-                break
+            # Store metadata from first page only
+            if base_meta is None:
+                base_meta = data
 
-            all_records.extend(content)
+            all_content.extend(data["content"])
 
-            # Stop early if fewer than limit returned
-            if len(content) < PAGE_LIMIT:
+            if len(data["content"]) < PAGE_LIMIT:
                 break
 
     # Trim to requested size
-    all_records = all_records[:size]
+    all_content = all_content[:size]
 
+    # Build Nepselytics-compatible response
     return {
         "success": True,
-        "count": len(all_records),
-        "page": page,
-        "requested_size": size,
-        "data": all_records
+        "code": None,
+        "message": None,
+        "data": {
+            "totalAmount": base_meta.get("totalAmount", 0),
+            "totalQty": base_meta.get("totalQty", 0),
+            "totalTrades": base_meta.get("totalTrades", 0),
+            "pageIndex": page,
+            "totalPages": base_meta.get("totalPages", 0),
+            "totalItems": base_meta.get("totalItems", 0),
+            "pageSize": size,
+            "content": all_content
+        }
     }
+
