@@ -22,7 +22,9 @@ app.add_middleware(
 NEPSELYTICS_URL = "https://nepselytics-6d61dea19f30.herokuapp.com/api/nepselytics/homepage"
 NEPSE_TURNOVER_URL = "https://tms59.nepsetms.com.np/tmsapi/rtApi/admin/vCache/marketTurnover"
 NEPSELYTICS_FLOORSHEET_URL = "https://nepselytics-6d61dea19f30.herokuapp.com/api/nepselytics/floorsheet"
+
 NEPALIPAISA_INDEX_URL = "https://nepalipaisa.com/api/GetIndexLive"
+NEPALIPAISA_SUBINDEX_URL = "https://nepalipaisa.com/api/GetSubIndexLive"
 
 # -------------------------------------------------
 # Root Endpoint
@@ -35,6 +37,7 @@ def root():
             "/homepage-data",
             "/market-turnover",
             "/index-live",
+            "/subindex-live",
             "/floorsheet",
             "/floorsheet/totals"
         ]
@@ -82,9 +85,6 @@ async def market_turnover():
 # -------------------------------------------------
 @app.get("/index-live")
 async def index_live():
-    """
-    Live NEPSE & sub-index data from NepaliPaisa
-    """
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
@@ -111,6 +111,39 @@ async def index_live():
     return resp.json()
 
 # -------------------------------------------------
+# NEPSE Sub-Index Live (NepaliPaisa)
+# -------------------------------------------------
+@app.get("/subindex-live")
+async def subindex_live():
+    """
+    Live NEPSE sub-index data (Banking, Hydro, Dev Bank, Finance, etc.)
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://nepalipaisa.com"
+    }
+
+    params = {
+        "_": int(time.time() * 1000)  # cache-buster
+    }
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            NEPALIPAISA_SUBINDEX_URL,
+            headers=headers,
+            params=params
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail="Failed to fetch NEPSE sub-index live data"
+        )
+
+    return resp.json()
+
+# -------------------------------------------------
 # Floorsheet Data (Live Trading)
 # -------------------------------------------------
 @app.get("/floorsheet")
@@ -126,7 +159,7 @@ async def floorsheet(
 
     if size > 100:
         all_records = []
-        pages_needed = (size + 99) // 100  # ceiling division
+        pages_needed = (size + 99) // 100
 
         async with httpx.AsyncClient(timeout=30) as client:
             for i in range(pages_needed):
@@ -151,21 +184,18 @@ async def floorsheet(
 
                 payload = resp.json()
                 records = payload.get("data", {}).get("content", [])
-
                 all_records.extend(records)
 
                 if len(records) < 100:
                     break
 
-        all_records = all_records[:size]
-
         return {
             "success": True,
-            "message": f"Fetched {len(all_records)} records",
-            "data": all_records,
+            "message": f"Fetched {len(all_records[:size])} records",
+            "data": all_records[:size],
             "pagination": {
                 "page": page,
-                "size": len(all_records),
+                "size": len(all_records[:size]),
                 "requested_size": size
             }
         }
