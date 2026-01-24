@@ -26,6 +26,9 @@ NEPSELYTICS_FLOORSHEET_URL = "https://nepselytics-6d61dea19f30.herokuapp.com/api
 NEPALIPAISA_INDEX_URL = "https://nepalipaisa.com/api/GetIndexLive"
 NEPALIPAISA_SUBINDEX_URL = "https://nepalipaisa.com/api/GetSubIndexLive"
 
+SHAREHUB_ANNOUNCEMENT_URL = "https://sharehubnepal.com/data/api/v1/announcement"
+
+
 # -------------------------------------------------
 # Root Endpoint
 # -------------------------------------------------
@@ -39,7 +42,8 @@ def root():
             "/index-live",
             "/subindex-live",
             "/floorsheet",
-            "/floorsheet/totals"
+            "/floorsheet/totals",
+            "/announcements"
         ]
     }
 
@@ -265,3 +269,37 @@ import uvicorn
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+# -------------------------------------------------
+# ShareHub Nepal Announcements
+# -------------------------------------------------
+@app.get("/announcements")
+async def announcements(
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(12, ge=1, le=50, description="Items per page")
+):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
+
+    params = {
+        "Page": page,
+        "Size": size
+    }
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            SHAREHUB_ANNOUNCEMENT_URL,
+            params=params,
+            headers=headers
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail="Failed to fetch ShareHub announcements"
+        )
+
+    return resp.json()
+
