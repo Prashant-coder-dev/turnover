@@ -19,7 +19,7 @@ app.add_middleware(
 # -------------------------------------------------
 # API URLs
 # -------------------------------------------------
-NEPSELYTICS_URL = "https://nepselytics-6d61dea19f30.herokuapp.com/api/nepselytics/homepage"
+NEPSELYTICS_URL = "https://sharehubnepal.com/live/api/v2/nepselive/home-page-data"
 NEPSE_TURNOVER_URL = "https://tms59.nepsetms.com.np/tmsapi/rtApi/admin/vCache/marketTurnover"
 NEPSELYTICS_FLOORSHEET_URL = "https://nepselytics-6d61dea19f30.herokuapp.com/api/nepselytics/floorsheet"
 
