@@ -28,8 +28,6 @@ NEPALIPAISA_SUBINDEX_URL = "https://nepalipaisa.com/api/GetSubIndexLive"
 
 SHAREHUB_ANNOUNCEMENT_URL = "https://sharehubnepal.com/data/api/v1/announcement"
 
-NEPSELYTICS_STOCK_CHART_URL = "https://nepselytics-6d61dea19f30.herokuapp.com/api/nepselytics/stock-chart"
-
 # -------------------------------------------------
 # Root Endpoint
 # -------------------------------------------------
@@ -306,23 +304,29 @@ async def announcements(
     return resp.json()
 
 # -------------------------------------------------
-# Stock Chart Data (NEPSELYTICS)
+# Stock Chart Data (ShareHub Nepal Price History)
 # -------------------------------------------------
 @app.get("/stock-chart/{symbol}")
 async def stock_chart(
     symbol: str,
     time: str = Query(
-        "1D",
-        regex="^(1D|1W|1M|3M|6M|1Y)$",
-        description="Timeframe: 1D, 1W, 1M, 3M, 6M, 1Y"
+        "1Y",
+        regex="^(1D|1W|1M|3M|6M|1Y|5Y)$",
+        description="Timeframe: 1D, 1W, 1M, 3M, 6M, 1Y, 5Y"
     )
 ):
+    """
+    Proxy endpoint for ShareHub Nepal price history graph API
+    """
+
+    # URL construction
+    base_url = "https://sharehubnepal.com/data/api/v1/price-history/graph"
+    url = f"{base_url}/{symbol.upper()}"
+
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
-
-    url = f"{NEPSELYTICS_STOCK_CHART_URL}/{symbol}"
 
     params = {
         "time": time
@@ -334,8 +338,7 @@ async def stock_chart(
     if resp.status_code != 200:
         raise HTTPException(
             status_code=resp.status_code,
-            detail="Failed to fetch stock chart data"
+            detail=f"Failed to fetch price history for {symbol.upper()}"
         )
 
     return resp.json()
-
