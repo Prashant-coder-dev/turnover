@@ -342,3 +342,24 @@ async def stock_chart(
         )
 
     return resp.json()
+
+
+@app.get("/stock-chart/index/1D")
+async def index_1d_chart():
+    """
+    Fetch 1D intraday index chart using ShareHub's daily-graph API.
+    """
+    url = "https://sharehubnepal.com/live/api/v1/daily-graph/index/58"
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(url, headers=headers)
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail="Failed to fetch 1D index graph"
+        )
+
+    return resp.json()
+
