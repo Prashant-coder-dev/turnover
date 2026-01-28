@@ -60,11 +60,13 @@ def root():
             "/floorsheet/totals",
             "/announcements",
             "/stock-chart/{symbol}?time=1D|1W|1M|3M|6M|1Y",
-            "/rsi/all",
-            "/rsi/symbol",
-            "/rsi/filter",
             "/stock-chart/index/1D",
-            "/stock-chart/{symbol}"
+            "/rsi/all",
+            "/rsi/symbol?symbol=SYMBOL",
+            "/rsi/filter?min=30&max=70",
+            "/rsi/status",
+            "/rsi/debug/symbols",
+            "/rsi/debug/csv"
         ]
     }
 
@@ -409,15 +411,19 @@ async def load_rsi_data():
     global RSI_RAW_CACHE, RSI_LATEST_CACHE
 
     try:
+        print("🔄 Fetching RSI data from Google Sheets...")
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.get(GOOGLE_SHEET_CSV)
 
         if resp.status_code != 200:
             print(f"❌ RSI CSV fetch failed: {resp.status_code}")
+            RSI_RAW_CACHE = pd.DataFrame()
             RSI_LATEST_CACHE = pd.DataFrame()
             return
 
+        print(f"✅ CSV fetched successfully ({len(resp.text)} bytes)")
         df = pd.read_csv(StringIO(resp.text))
+        print(f"📊 Raw data loaded: {len(df)} rows, columns: {df.columns.tolist()}")
 
         # Normalize column names (CRITICAL)
         df.columns = df.columns.str.strip().str.lower()
@@ -425,6 +431,8 @@ async def load_rsi_data():
         required = {"date", "symbol", "close"}
         if not required.issubset(df.columns):
             print("❌ Missing required columns:", df.columns.tolist())
+            print(f"   Expected: {required}")
+            RSI_RAW_CACHE = pd.DataFrame()
             RSI_LATEST_CACHE = pd.DataFrame()
             return
 
@@ -433,43 +441,91 @@ async def load_rsi_data():
 
         df = df.dropna(subset=["date", "symbol", "close"])
         df = df.sort_values(["symbol", "date"])
+        
+        # Store raw cache for debugging
+        RSI_RAW_CACHE = df.copy()
+        print(f"📦 Raw cache stored: {len(RSI_RAW_CACHE)} rows after cleaning")
 
         results = []
+        symbols_processed = 0
+        symbols_skipped = 0
 
         for symbol, g in df.groupby("symbol"):
             if len(g) < RSI_PERIOD + 1:
+                symbols_skipped += 1
                 continue
 
+            g = g.copy()  # Avoid SettingWithCopyWarning
             g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
             last = g.iloc[-1]
 
             if pd.isna(last["rsi"]):
+                symbols_skipped += 1
                 continue
 
             results.append({
-                "symbol": symbol.upper(),
+                "symbol": str(symbol).upper(),
                 "close": float(last["close"]),
                 "rsi": round(float(last["rsi"]), 2)
             })
+            symbols_processed += 1
 
         RSI_LATEST_CACHE = pd.DataFrame(results)
 
         print(f"✅ RSI Loaded for {len(RSI_LATEST_CACHE)} symbols")
+        print(f"   Processed: {symbols_processed}, Skipped: {symbols_skipped}")
+        if len(RSI_LATEST_CACHE) > 0:
+            print(f"   Sample symbols: {RSI_LATEST_CACHE['symbol'].head(5).tolist()}")
 
     except Exception as e:
         print("❌ RSI startup exception:", str(e))
+        import traceback
+        traceback.print_exc()
+        RSI_RAW_CACHE = pd.DataFrame()
         RSI_LATEST_CACHE = pd.DataFrame()
 
 @app.get("/rsi/debug/symbols")
 def rsi_debug_symbols():
-    return (
-        RSI_RAW_CACHE
-        .groupby("symbol")
-        .size()
-        .sort_values(ascending=False)
-        .head(20)
-        .to_dict()
-    )
+    """Debug endpoint to see symbol counts in raw data"""
+    if RSI_RAW_CACHE is None or RSI_RAW_CACHE.empty:
+        return {"error": "No raw RSI data loaded", "symbols": {}}
+    
+    return {
+        "total_rows": len(RSI_RAW_CACHE),
+        "unique_symbols": RSI_RAW_CACHE["symbol"].nunique(),
+        "symbol_counts": (
+            RSI_RAW_CACHE
+            .groupby("symbol")
+            .size()
+            .sort_values(ascending=False)
+            .head(20)
+            .to_dict()
+        )
+    }
+
+@app.get("/rsi/debug/csv")
+async def rsi_debug_csv():
+    """Debug endpoint to see raw CSV data from Google Sheets"""
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(GOOGLE_SHEET_CSV)
+        
+        if resp.status_code != 200:
+            return {"error": f"CSV fetch failed: {resp.status_code}"}
+        
+        # Parse CSV
+        df = pd.read_csv(StringIO(resp.text))
+        
+        return {
+            "status": "success",
+            "total_rows": len(df),
+            "columns_original": df.columns.tolist(),
+            "columns_normalized": df.columns.str.strip().str.lower().tolist(),
+            "first_5_rows": df.head(5).to_dict(orient="records"),
+            "dtypes": df.dtypes.astype(str).to_dict()
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 # -------------------------------------------------
 # RSI ENDPOINTS
@@ -519,14 +575,4 @@ def rsi_status():
     return {
         "status": "ready",
         "symbols": len(RSI_LATEST_CACHE)
-    }
-
-# -------------------------------------------------
-# ROOT
-# -------------------------------------------------
-@app.get("/")
-def root():
-    return {
-        "status": "NEPSE API running",
-        "rsi_symbols": 0 if RSI_LATEST_CACHE is None else len(RSI_LATEST_CACHE)
     }
