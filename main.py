@@ -64,9 +64,7 @@ def root():
             "/rsi/all",
             "/rsi/symbol?symbol=SYMBOL",
             "/rsi/filter?min=30&max=70",
-            "/rsi/status",
-            "/rsi/debug/symbols",
-            "/rsi/debug/csv"
+            "/rsi/status"
         ]
     }
 
@@ -484,56 +482,6 @@ async def load_rsi_data():
         traceback.print_exc()
         RSI_RAW_CACHE = pd.DataFrame()
         RSI_LATEST_CACHE = pd.DataFrame()
-
-@app.get("/rsi/debug/symbols")
-def rsi_debug_symbols():
-    """Debug endpoint to see symbol counts in raw data"""
-    if RSI_RAW_CACHE is None or RSI_RAW_CACHE.empty:
-        return {"error": "No raw RSI data loaded", "symbols": {}}
-    
-    return {
-        "total_rows": len(RSI_RAW_CACHE),
-        "unique_symbols": RSI_RAW_CACHE["symbol"].nunique(),
-        "symbol_counts": (
-            RSI_RAW_CACHE
-            .groupby("symbol")
-            .size()
-            .sort_values(ascending=False)
-            .head(20)
-            .to_dict()
-        )
-    }
-
-@app.get("/rsi/debug/csv")
-async def rsi_debug_csv():
-    """Debug endpoint to see raw CSV data from Google Sheets"""
-    try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            resp = await client.get(GOOGLE_SHEET_CSV)
-        
-        if resp.status_code != 200:
-            return {
-                "error": f"CSV fetch failed: {resp.status_code}",
-                "response_preview": resp.text[:200] if resp.text else "No response body"
-            }
-        
-        # Parse CSV
-        df = pd.read_csv(StringIO(resp.text))
-        
-        return {
-            "status": "success",
-            "total_rows": len(df),
-            "columns_original": df.columns.tolist(),
-            "columns_normalized": df.columns.str.strip().str.lower().tolist(),
-            "first_5_rows": df.head(5).to_dict(orient="records"),
-            "dtypes": df.dtypes.astype(str).to_dict()
-        }
-    except Exception as e:
-        import traceback
-        return {
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
 
 # -------------------------------------------------
 # RSI ENDPOINTS
