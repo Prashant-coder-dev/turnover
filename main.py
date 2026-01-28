@@ -2,6 +2,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import time
+import pandas as pd
+import numpy as np
+from io import StringIO
 
 app = FastAPI(title="NEPSE Unified Market Data API")
 
@@ -29,6 +32,19 @@ NEPALIPAISA_SUBINDEX_URL = "https://nepalipaisa.com/api/GetSubIndexLive"
 SHAREHUB_ANNOUNCEMENT_URL = "https://sharehubnepal.com/data/api/v1/announcement"
 
 # -------------------------------------------------
+# RSI – Google Sheet Config
+# -------------------------------------------------
+GOOGLE_SHEET_CSV = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1Q_En7VGGfifDmn5xuiF-t_02doPpwl4PLzxb4TBCW0Q"
+    "/export?format=csv"
+)
+
+RSI_PERIOD = 14
+RSI_RAW_CACHE = None
+RSI_LATEST_CACHE = None
+
+# -------------------------------------------------
 # Root Endpoint
 # -------------------------------------------------
 @app.get("/")
@@ -43,7 +59,12 @@ def root():
             "/floorsheet",
             "/floorsheet/totals",
             "/announcements",
-            "/stock-chart/{symbol}?time=1D|1W|1M|3M|6M|1Y"
+            "/stock-chart/{symbol}?time=1D|1W|1M|3M|6M|1Y",
+            "/rsi/all",
+            "/rsi/symbol",
+            "/rsi/filter",
+            "/stock-chart/index/1D",
+            "/stock-chart/{symbol}"
         ]
     }
 
@@ -363,3 +384,87 @@ async def index_1d_chart():
 
     return resp.json()
 
+# -------------------------------------------------
+# RSI Engine
+# -------------------------------------------------
+def calculate_rsi(close: pd.Series, period: int = 14):
+    delta = close.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+@app.on_event("startup")
+async def load_rsi_data():
+    global RSI_RAW_CACHE, RSI_LATEST_CACHE
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(GOOGLE_SHEET_CSV)
+
+    if resp.status_code != 200:
+        print("❌ Failed to load RSI sheet")
+        return
+
+    df = pd.read_csv(StringIO(resp.text))
+
+    # Expected columns: Date, Symbol, Close
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values(["Symbol", "Date"])
+
+    RSI_RAW_CACHE = df
+
+    results = []
+
+    for symbol, g in df.groupby("Symbol"):
+        if len(g) < RSI_PERIOD + 1:
+            continue
+
+        g["RSI"] = calculate_rsi(g["Close"], RSI_PERIOD)
+        last = g.iloc[-1]
+
+        results.append({
+            "symbol": symbol,
+            "close": float(last["Close"]),
+            "rsi": round(float(last["RSI"]), 2)
+        })
+
+    RSI_LATEST_CACHE = pd.DataFrame(results)
+
+    print(f"✅ RSI Loaded for {len(RSI_LATEST_CACHE)} symbols")
+
+@app.get("/rsi/all")
+def rsi_all():
+    if RSI_LATEST_CACHE is None:
+        raise HTTPException(status_code=503, detail="RSI data not ready")
+    return RSI_LATEST_CACHE.to_dict(orient="records")
+
+@app.get("/rsi/symbol")
+def rsi_symbol(symbol: str = Query(...)):
+    df = RSI_LATEST_CACHE
+    row = df[df["symbol"] == symbol.upper()]
+
+    if row.empty:
+        raise HTTPException(status_code=404, detail="Symbol not found")
+
+    return row.to_dict(orient="records")[0]
+
+@app.get("/rsi/filter")
+def rsi_filter(
+    min: float = Query(None, description="Minimum RSI"),
+    max: float = Query(None, description="Maximum RSI")
+):
+    df = RSI_LATEST_CACHE.copy()
+
+    if min is not None:
+        df = df[df["rsi"] >= min]
+
+    if max is not None:
+        df = df[df["rsi"] <= max]
+
+    return df.sort_values("rsi").to_dict(orient="records")
