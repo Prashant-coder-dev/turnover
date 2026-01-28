@@ -51,6 +51,7 @@ MA_LATEST_CACHE = pd.DataFrame()
 CROSSOVER_LATEST_CACHE = pd.DataFrame()
 CONFLUENCE_LATEST_CACHE = pd.DataFrame()
 CANDLESTICK_LATEST_CACHE = pd.DataFrame()
+MOMENTUM_LATEST_CACHE = pd.DataFrame()
 TECHNICAL_RAW_CACHE = None
 
 # -------------------------------------------------
@@ -78,6 +79,7 @@ def root():
             "/crossovers/all",
             "/confluence/all",
             "/candlesticks/all",
+            "/momentum/all",
             "/refresh-technical"
         ]
     }
@@ -474,7 +476,7 @@ def calculate_confluence_score(rsi, ma_dist_pct, sma50, sma200):
 # -------------------------------------------------
 @app.on_event("startup")
 async def load_technical_data():
-    global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE, CROSSOVER_LATEST_CACHE, CONFLUENCE_LATEST_CACHE, CANDLESTICK_LATEST_CACHE
+    global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE, CROSSOVER_LATEST_CACHE, CONFLUENCE_LATEST_CACHE, CANDLESTICK_LATEST_CACHE, MOMENTUM_LATEST_CACHE
 
     try:
         print("🔄 Fetching Technical data from Google Sheets...")
@@ -488,41 +490,41 @@ async def load_technical_data():
         df = pd.read_csv(StringIO(resp.text))
         df.columns = df.columns.str.strip().str.lower()
         
-        # Ensure we have OHLCV
-        required = {"date", "symbol", "open", "high", "low", "close"}
+        required = {"date", "symbol", "open", "high", "low", "close", "volume"}
         if not required.issubset(df.columns):
             print(f"❌ Missing required columns: {required - set(df.columns)}")
             return
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        for col in ["open", "high", "low", "close"]:
+        for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         
         df = df.dropna(subset=["date", "symbol", "close"])
         df = df.sort_values(["symbol", "date"])
         TECHNICAL_RAW_CACHE = df.copy()
 
-        rsi_list, ma_list, cross_list, conf_list, candle_list = [], [], [], [], []
+        rsi_list, ma_list, cross_list, conf_list, candle_list, momentum_list = [], [], [], [], [], []
 
         for symbol, g in df.groupby("symbol"):
             g = g.copy()
             data_len = len(g)
             if data_len < 2: continue
             
-            # 1. Indicators
+            # Indicators
             g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
             g["ma20"] = calculate_ma(g["close"], MA_PERIOD)
             g["sma50"] = calculate_ma(g["close"], MA_50)
             g["sma200"] = calculate_ma(g["close"], MA_200)
+            g["vol_avg20"] = calculate_ma(g["volume"], 20)
             
             last = g.iloc[-1]
             prev = g.iloc[-2]
             
-            # 2. RSI Results
+            # RSI Results
             if not pd.isna(last["rsi"]):
                 rsi_list.append({"symbol": str(symbol).upper(), "close": float(last["close"]), "rsi": round(float(last["rsi"]), 2)})
 
-            # 3. MA 20 Results
+            # MA 20 Results
             ma_dist_pct = 0
             if not pd.isna(last["ma20"]):
                 ma_dist_pct = (last["close"] - last["ma20"]) / last["ma20"] * 100
@@ -531,7 +533,7 @@ async def load_technical_data():
                     "ma": round(float(last["ma20"]), 2), "percent_diff": round(float(ma_dist_pct), 2)
                 })
 
-            # 4. Crossover Results
+            # Crossover Results
             if data_len >= MA_200 and not pd.isna(last["sma200"]):
                 signal = "Golden Cross" if (prev["sma50"] <= prev["sma200"] and last["sma50"] > last["sma200"]) else \
                          "Death Cross" if (prev["sma50"] >= prev["sma200"] and last["sma50"] < last["sma200"]) else \
@@ -543,12 +545,12 @@ async def load_technical_data():
                     "signal": signal, "is_cross": ("Cross" in signal and "Alignment" not in signal)
                 })
 
-            # 5. Candlestick Results
+            # Candlestick Results
             pattern = detect_candlestick(g)
             if pattern != "Neutral":
                 candle_list.append({"symbol": str(symbol).upper(), "close": float(last["close"]), "pattern": pattern})
 
-            # 6. Confluence Result
+            # Confluence Result
             score = calculate_confluence_score(last["rsi"], ma_dist_pct, last["sma50"], last["sma200"])
             conf_list.append({
                 "symbol": str(symbol).upper(), "close": float(last["close"]), "score": int(score),
@@ -556,13 +558,46 @@ async def load_technical_data():
                 "trend": "Bullish" if score > 60 else "Bearish" if score < 40 else "Neutral"
             })
 
+            # Momentum IQ (Volume Shocker, 52-Week High, RS)
+            vol_ratio = 0
+            if not pd.isna(last["vol_avg20"]) and last["vol_avg20"] > 0:
+                vol_ratio = last["volume"] / last["vol_avg20"]
+
+            # 52-Week logic (approx 250 days)
+            win_52 = g.tail(250)
+            high_52 = float(win_52["high"].max())
+            low_52 = float(win_52["low"].min())
+            
+            within_high = (high_52 - last["close"]) / high_52 <= 0.02 # 2% from high
+            within_low = (last["close"] - low_52) / low_52 <= 0.02 # 2% from low
+            
+            # Simple RS Score: (Current Price / Price 1 Year Ago or 250 days ago)
+            rs_score = 0
+            if data_len >= 250:
+                start_price = g.iloc[-250]["close"]
+                if start_price > 0:
+                    rs_score = (last["close"] / start_price) * 100
+
+            momentum_list.append({
+                "symbol": str(symbol).upper(),
+                "close": float(last["close"]),
+                "volume": int(last["volume"]),
+                "vol_avg20": round(float(last["vol_avg20"]), 0),
+                "vol_ratio": round(float(vol_ratio), 2),
+                "high_52": high_52,
+                "low_52": low_52,
+                "rs_score": round(float(rs_score), 2),
+                "breakout": "High" if last["close"] >= high_52 else "Low" if last["close"] <= low_52 else "Near High" if within_high else "Near Low" if within_low else "Neutral"
+            })
+
         RSI_LATEST_CACHE = pd.DataFrame(rsi_list)
         MA_LATEST_CACHE = pd.DataFrame(ma_list)
         CROSSOVER_LATEST_CACHE = pd.DataFrame(cross_list)
         CANDLESTICK_LATEST_CACHE = pd.DataFrame(candle_list)
         CONFLUENCE_LATEST_CACHE = pd.DataFrame(conf_list)
+        MOMENTUM_LATEST_CACHE = pd.DataFrame(momentum_list)
 
-        print(f"✅ Technical Data Summary: RSI:{len(rsi_list)}, MA:{len(ma_list)}, Conf:{len(conf_list)}")
+        print(f"✅ Technical Data Loaded: RSI:{len(rsi_list)}, MA:{len(ma_list)}, Mom:{len(momentum_list)}")
 
     except Exception as e:
         print("❌ Startup Load Error:", str(e))
@@ -574,6 +609,7 @@ async def load_technical_data():
         CROSSOVER_LATEST_CACHE = pd.DataFrame()
         CONFLUENCE_LATEST_CACHE = pd.DataFrame()
         CANDLESTICK_LATEST_CACHE = pd.DataFrame()
+        MOMENTUM_LATEST_CACHE = pd.DataFrame()
 
 # -------------------------------------------------
 # TECHNICAL ENDPOINTS (RSI & MA)
@@ -605,6 +641,10 @@ def confluence_all():
 @app.get("/candlesticks/all")
 def candlesticks_all():
     return CANDLESTICK_LATEST_CACHE.to_dict(orient="records")
+
+@app.get("/momentum/all")
+def momentum_all():
+    return MOMENTUM_LATEST_CACHE.to_dict(orient="records")
 
 @app.get("/refresh-technical")
 async def refresh_technical():
