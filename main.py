@@ -499,6 +499,17 @@ def rsi_filter(
 
     return df.sort_values("rsi").to_dict(orient="records")
 
+@app.get("/rsi/status")
+def rsi_status():
+    if RSI_LATEST_CACHE is None:
+        return {"status": "not_loaded"}
+    if RSI_LATEST_CACHE.empty:
+        return {"status": "loaded_but_empty"}
+    return {
+        "status": "ready",
+        "symbols": len(RSI_LATEST_CACHE)
+    }
+
 # -------------------------------------------------
 # ROOT
 # -------------------------------------------------
