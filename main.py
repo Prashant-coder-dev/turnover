@@ -409,56 +409,56 @@ async def load_rsi_data():
     global RSI_RAW_CACHE, RSI_LATEST_CACHE
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.get(GOOGLE_SHEET_CSV)
 
         if resp.status_code != 200:
-            print("❌ Failed to fetch RSI sheet")
+            print(f"❌ RSI CSV fetch failed: {resp.status_code}")
+            RSI_LATEST_CACHE = pd.DataFrame()
             return
 
         df = pd.read_csv(StringIO(resp.text))
 
-        required_cols = {"Date", "Symbol", "Close"}
-        if not required_cols.issubset(df.columns):
-            print("❌ Sheet missing required columns")
+        # Normalize column names (CRITICAL)
+        df.columns = df.columns.str.strip().str.lower()
+
+        required = {"date", "symbol", "close"}
+        if not required.issubset(df.columns):
+            print("❌ Missing required columns:", df.columns.tolist())
+            RSI_LATEST_CACHE = pd.DataFrame()
             return
 
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df["Symbol"] = df["Symbol"].astype(str).str.upper()
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
 
-        df = df.dropna(subset=["Date", "Symbol", "Close"])
-        df = df.sort_values(["Symbol", "Date"])
-
-        RSI_RAW_CACHE = df
+        df = df.dropna(subset=["date", "symbol", "close"])
+        df = df.sort_values(["symbol", "date"])
 
         results = []
 
-        for symbol, g in df.groupby("Symbol"):
+        for symbol, g in df.groupby("symbol"):
             if len(g) < RSI_PERIOD + 1:
                 continue
 
-            g = g.copy()
-            g["RSI"] = calculate_rsi(g["Close"], RSI_PERIOD)
-
-            g = g.dropna(subset=["RSI"])
-            if g.empty:
-                continue
-
+            g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
             last = g.iloc[-1]
 
+            if pd.isna(last["rsi"]):
+                continue
+
             results.append({
-                "symbol": symbol,
-                "close": round(float(last["Close"]), 2),
-                "rsi": round(float(last["RSI"]), 2)
+                "symbol": symbol.upper(),
+                "close": float(last["close"]),
+                "rsi": round(float(last["rsi"]), 2)
             })
 
         RSI_LATEST_CACHE = pd.DataFrame(results)
 
-        print(f"✅ RSI loaded for {len(RSI_LATEST_CACHE)} symbols")
+        print(f"✅ RSI Loaded for {len(RSI_LATEST_CACHE)} symbols")
 
     except Exception as e:
-        print("❌ RSI startup error:", e)
+        print("❌ RSI startup exception:", str(e))
+        RSI_LATEST_CACHE = pd.DataFrame()
 
 # -------------------------------------------------
 # RSI ENDPOINTS
