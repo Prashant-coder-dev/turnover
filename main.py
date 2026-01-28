@@ -41,10 +41,13 @@ GOOGLE_SHEET_CSV = (
 )
 
 RSI_PERIOD = 14
-MA_PERIOD = 20  # Default 20-day Simple Moving Average
+MA_PERIOD = 20
+MA_50 = 50
+MA_200 = 200
 
 RSI_LATEST_CACHE = None
 MA_LATEST_CACHE = None
+CROSSOVER_LATEST_CACHE = None
 TECHNICAL_RAW_CACHE = None
 
 # -------------------------------------------------
@@ -68,7 +71,8 @@ def root():
             "/rsi/filter?min=30&max=70",
             "/rsi/status",
             "/ma/all",
-            "/ma/status"
+            "/ma/status",
+            "/crossovers/all"
         ]
     }
 
@@ -446,6 +450,9 @@ async def load_technical_data():
 
         rsi_results = []
         ma_results = []
+        crossover_results = []
+
+        FOR_CROSSOVER = MA_200 + 5 # Need extra data for previous day's cross detection
 
         for symbol, g in df.groupby("symbol"):
             g = g.copy()
@@ -461,25 +468,65 @@ async def load_technical_data():
                         "rsi": round(float(last_rsi["rsi"]), 2)
                     })
 
-            # MA Calculation
+            # MA 20 Calculation
             if len(g) >= MA_PERIOD:
-                g["ma"] = calculate_ma(g["close"], MA_PERIOD)
+                g["ma_20"] = calculate_ma(g["close"], MA_PERIOD)
                 last_ma = g.iloc[-1]
-                if not pd.isna(last_ma["ma"]):
+                if "ma_20" in g.columns and not pd.isna(last_ma["ma_20"]):
                     ma_results.append({
                         "symbol": str(symbol).upper(),
                         "close": float(last_ma["close"]),
-                        "ma": round(float(last_ma["ma"]), 2),
-                        "diff": round(float(last_ma["close"] - last_ma["ma"]), 2),
-                        "percent_diff": round(float((last_ma["close"] - last_ma["ma"]) / last_ma["ma"] * 100), 2)
+                        "ma": round(float(last_ma["ma_20"]), 2),
+                        "diff": round(float(last_ma["close"] - last_ma["ma_20"]), 2),
+                        "percent_diff": round(float((last_ma["close"] - last_ma["ma_20"]) / last_ma["ma_20"] * 100), 2)
                     })
+
+            # MA 50/200 Crossover Detection
+            if len(g) >= MA_200:
+                g["sma50"] = calculate_ma(g["close"], MA_50)
+                g["sma200"] = calculate_ma(g["close"], MA_200)
+                
+                # Check for crossover in the last 2 records
+                if len(g) >= 2:
+                    curr = g.iloc[-1]
+                    prev = g.iloc[-2]
+                    
+                    if not pd.isna(curr["sma50"]) and not pd.isna(curr["sma200"]):
+                        signal = "Neutral"
+                        is_cross = False
+                        
+                        # Detect Golden Cross (50 crosses ABOVE 200)
+                        if prev["sma50"] <= prev["sma200"] and curr["sma50"] > curr["sma200"]:
+                            signal = "Golden Cross"
+                            is_cross = True
+                        # Detect Death Cross (50 crosses BELOW 200)
+                        elif prev["sma50"] >= prev["sma200"] and curr["sma50"] < curr["sma200"]:
+                            signal = "Death Cross"
+                            is_cross = True
+                        # Ongoing trend alignment
+                        elif curr["sma50"] > curr["sma200"]:
+                            signal = "Bullish Alignment"
+                        else:
+                            signal = "Bearish Alignment"
+
+                        crossover_results.append({
+                            "symbol": str(symbol).upper(),
+                            "close": float(curr["close"]),
+                            "sma50": round(float(curr["sma50"]), 2),
+                            "sma200": round(float(curr["sma200"]), 2),
+                            "signal": signal,
+                            "is_cross": is_cross,
+                            "distance": round(float(curr["sma50"] - curr["sma200"]), 2)
+                        })
 
         RSI_LATEST_CACHE = pd.DataFrame(rsi_results)
         MA_LATEST_CACHE = pd.DataFrame(ma_results)
+        CROSSOVER_LATEST_CACHE = pd.DataFrame(crossover_results)
 
         print(f"✅ Technical Data Loaded:")
         print(f"   RSI: {len(RSI_LATEST_CACHE)} symbols")
-        print(f"   MA-{MA_PERIOD}: {len(MA_LATEST_CACHE)} symbols")
+        print(f"   MA-20: {len(MA_LATEST_CACHE)} symbols")
+        print(f"   Crossovers: {len(CROSSOVER_LATEST_CACHE)} symbols")
 
     except Exception as e:
         print("❌ Startup exception:", str(e))
@@ -487,6 +534,7 @@ async def load_technical_data():
         traceback.print_exc()
         RSI_LATEST_CACHE = pd.DataFrame()
         MA_LATEST_CACHE = pd.DataFrame()
+        CROSSOVER_LATEST_CACHE = pd.DataFrame()
 
 # -------------------------------------------------
 # TECHNICAL ENDPOINTS (RSI & MA)
@@ -515,6 +563,12 @@ def ma_status():
         "symbols": len(MA_LATEST_CACHE),
         "period": MA_PERIOD
     }
+
+@app.get("/crossovers/all")
+def crossovers_all():
+    if CROSSOVER_LATEST_CACHE is None or CROSSOVER_LATEST_CACHE.empty:
+        raise HTTPException(status_code=503, detail="Crossover data not ready")
+    return CROSSOVER_LATEST_CACHE.to_dict(orient="records")
 
 @app.get("/rsi/filter")
 def rsi_filter(
