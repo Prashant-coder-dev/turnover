@@ -560,29 +560,37 @@ async def load_technical_data():
 
             # Momentum IQ (Volume Shocker, 52-Week High, RS)
             vol_ratio = 0
-            if not pd.isna(last["vol_avg20"]) and last["vol_avg20"] > 0:
-                vol_ratio = last["volume"] / last["vol_avg20"]
+            v_avg = last["vol_avg20"] if not pd.isna(last["vol_avg20"]) else 0
+            if v_avg > 0:
+                vol_ratio = last["volume"] / v_avg
 
             # 52-Week logic (approx 250 days)
             win_52 = g.tail(250)
-            high_52 = float(win_52["high"].max())
-            low_52 = float(win_52["low"].min())
+            h52 = win_52["high"].max()
+            l52 = win_52["low"].min()
             
-            within_high = (high_52 - last["close"]) / high_52 <= 0.02 # 2% from high
-            within_low = (last["close"] - low_52) / low_52 <= 0.02 # 2% from low
+            high_52 = float(h52) if not pd.isna(h52) else float(last["close"])
+            low_52 = float(l52) if not pd.isna(l52) else float(last["close"])
+            
+            within_high = False
+            within_low = False
+            if high_52 > 0:
+                within_high = (high_52 - last["close"]) / high_52 <= 0.02
+            if low_52 > 0:
+                within_low = (last["close"] - low_52) / low_52 <= 0.02
             
             # Simple RS Score: (Current Price / Price 1 Year Ago or 250 days ago)
             rs_score = 0
             if data_len >= 250:
                 start_price = g.iloc[-250]["close"]
-                if start_price > 0:
+                if not pd.isna(start_price) and start_price > 0:
                     rs_score = (last["close"] / start_price) * 100
 
             momentum_list.append({
                 "symbol": str(symbol).upper(),
                 "close": float(last["close"]),
-                "volume": int(last["volume"]),
-                "vol_avg20": round(float(last["vol_avg20"]), 0),
+                "volume": int(last["volume"]) if not pd.isna(last["volume"]) else 0,
+                "vol_avg20": round(float(v_avg), 0),
                 "vol_ratio": round(float(vol_ratio), 2),
                 "high_52": high_52,
                 "low_52": low_52,
