@@ -412,11 +412,12 @@ async def load_rsi_data():
 
     try:
         print("🔄 Fetching RSI data from Google Sheets...")
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             resp = await client.get(GOOGLE_SHEET_CSV)
 
         if resp.status_code != 200:
             print(f"❌ RSI CSV fetch failed: {resp.status_code}")
+            print(f"   Response: {resp.text[:200]}")
             RSI_RAW_CACHE = pd.DataFrame()
             RSI_LATEST_CACHE = pd.DataFrame()
             return
@@ -507,11 +508,14 @@ def rsi_debug_symbols():
 async def rsi_debug_csv():
     """Debug endpoint to see raw CSV data from Google Sheets"""
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             resp = await client.get(GOOGLE_SHEET_CSV)
         
         if resp.status_code != 200:
-            return {"error": f"CSV fetch failed: {resp.status_code}"}
+            return {
+                "error": f"CSV fetch failed: {resp.status_code}",
+                "response_preview": resp.text[:200] if resp.text else "No response body"
+            }
         
         # Parse CSV
         df = pd.read_csv(StringIO(resp.text))
@@ -525,7 +529,11 @@ async def rsi_debug_csv():
             "dtypes": df.dtypes.astype(str).to_dict()
         }
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 # -------------------------------------------------
 # RSI ENDPOINTS
