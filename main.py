@@ -624,11 +624,11 @@ async def load_technical_data():
 # -------------------------------------------------
 @app.get("/rsi/all")
 def rsi_all():
-    return RSI_LATEST_CACHE.to_dict(orient="records")
+    return RSI_LATEST_CACHE.where(pd.notnull(RSI_LATEST_CACHE), None).to_dict(orient="records")
 
 @app.get("/ma/all")
 def ma_all():
-    return MA_LATEST_CACHE.to_dict(orient="records")
+    return MA_LATEST_CACHE.where(pd.notnull(MA_LATEST_CACHE), None).to_dict(orient="records")
 
 @app.get("/ma/status")
 def ma_status():
@@ -640,19 +640,21 @@ def ma_status():
 
 @app.get("/crossovers/all")
 def crossovers_all():
-    return CROSSOVER_LATEST_CACHE.to_dict(orient="records")
+    return CROSSOVER_LATEST_CACHE.where(pd.notnull(CROSSOVER_LATEST_CACHE), None).to_dict(orient="records")
 
 @app.get("/confluence/all")
 def confluence_all():
-    return CONFLUENCE_LATEST_CACHE.sort_values("score", ascending=False).to_dict(orient="records")
+    if CONFLUENCE_LATEST_CACHE.empty: return []
+    df = CONFLUENCE_LATEST_CACHE.sort_values("score", ascending=False)
+    return df.where(pd.notnull(df), None).to_dict(orient="records")
 
 @app.get("/candlesticks/all")
 def candlesticks_all():
-    return CANDLESTICK_LATEST_CACHE.to_dict(orient="records")
+    return CANDLESTICK_LATEST_CACHE.where(pd.notnull(CANDLESTICK_LATEST_CACHE), None).to_dict(orient="records")
 
 @app.get("/momentum/all")
 def momentum_all():
-    return MOMENTUM_LATEST_CACHE.to_dict(orient="records")
+    return MOMENTUM_LATEST_CACHE.where(pd.notnull(MOMENTUM_LATEST_CACHE), None).to_dict(orient="records")
 
 @app.get("/refresh-technical")
 async def refresh_technical():
