@@ -5,6 +5,8 @@ import time
 import pandas as pd
 import numpy as np
 from io import StringIO
+import json
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="NEPSE Unified Market Data API")
 
@@ -506,6 +508,11 @@ async def load_technical_data():
         rsi_list, ma_list, cross_list, conf_list, candle_list, momentum_list = [], [], [], [], [], []
 
         for symbol, g in df.groupby("symbol"):
+            symbol_str = str(symbol).upper()
+            # Exclude Debentures and Mutual Funds (usually contain digits)
+            if any(char.isdigit() for char in symbol_str):
+                continue
+
             g = g.copy()
             data_len = len(g)
             if data_len < 2: continue
@@ -605,7 +612,7 @@ async def load_technical_data():
         CONFLUENCE_LATEST_CACHE = pd.DataFrame(conf_list)
         MOMENTUM_LATEST_CACHE = pd.DataFrame(momentum_list)
 
-        print(f"✅ Technical Data Loaded: RSI:{len(rsi_list)}, MA:{len(ma_list)}, Mom:{len(momentum_list)}")
+        print(f"✅ Technical Data Loaded: RSI:{len(rsi_list)}, MA:{len(ma_list)}, Conf:{len(conf_list)}, Mom:{len(momentum_list)}")
 
     except Exception as e:
         print("❌ Startup Load Error:", str(e))
@@ -624,11 +631,11 @@ async def load_technical_data():
 # -------------------------------------------------
 @app.get("/rsi/all")
 def rsi_all():
-    return RSI_LATEST_CACHE.where(pd.notnull(RSI_LATEST_CACHE), None).to_dict(orient="records")
+    return JSONResponse(content=json.loads(RSI_LATEST_CACHE.to_json(orient="records")))
 
 @app.get("/ma/all")
 def ma_all():
-    return MA_LATEST_CACHE.where(pd.notnull(MA_LATEST_CACHE), None).to_dict(orient="records")
+    return JSONResponse(content=json.loads(MA_LATEST_CACHE.to_json(orient="records")))
 
 @app.get("/ma/status")
 def ma_status():
@@ -640,21 +647,21 @@ def ma_status():
 
 @app.get("/crossovers/all")
 def crossovers_all():
-    return CROSSOVER_LATEST_CACHE.where(pd.notnull(CROSSOVER_LATEST_CACHE), None).to_dict(orient="records")
+    return JSONResponse(content=json.loads(CROSSOVER_LATEST_CACHE.to_json(orient="records")))
 
 @app.get("/confluence/all")
 def confluence_all():
     if CONFLUENCE_LATEST_CACHE.empty: return []
     df = CONFLUENCE_LATEST_CACHE.sort_values("score", ascending=False)
-    return df.where(pd.notnull(df), None).to_dict(orient="records")
+    return JSONResponse(content=json.loads(df.to_json(orient="records")))
 
 @app.get("/candlesticks/all")
 def candlesticks_all():
-    return CANDLESTICK_LATEST_CACHE.where(pd.notnull(CANDLESTICK_LATEST_CACHE), None).to_dict(orient="records")
+    return JSONResponse(content=json.loads(CANDLESTICK_LATEST_CACHE.to_json(orient="records")))
 
 @app.get("/momentum/all")
 def momentum_all():
-    return MOMENTUM_LATEST_CACHE.where(pd.notnull(MOMENTUM_LATEST_CACHE), None).to_dict(orient="records")
+    return JSONResponse(content=json.loads(MOMENTUM_LATEST_CACHE.to_json(orient="records")))
 
 @app.get("/refresh-technical")
 async def refresh_technical():
