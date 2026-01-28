@@ -49,6 +49,8 @@ MA_200 = 200
 RSI_LATEST_CACHE = pd.DataFrame()
 MA_LATEST_CACHE = pd.DataFrame()
 CROSSOVER_LATEST_CACHE = pd.DataFrame()
+CONFLUENCE_LATEST_CACHE = pd.DataFrame()
+CANDLESTICK_LATEST_CACHE = pd.DataFrame()
 TECHNICAL_RAW_CACHE = None
 
 # -------------------------------------------------
@@ -73,7 +75,10 @@ def root():
             "/rsi/status",
             "/ma/all",
             "/ma/status",
-            "/crossovers/all"
+            "/crossovers/all",
+            "/confluence/all",
+            "/candlesticks/all",
+            "/refresh-technical"
         ]
     }
 
@@ -394,30 +399,82 @@ async def index_1d_chart():
     return resp.json()
 
 # -------------------------------------------------
-# TECHNICAL CALCULATIONS
+# TECHNICAL CALCULATIONS (ADVANCED)
 # -------------------------------------------------
 def calculate_rsi(close: pd.Series, period: int = 14):
     delta = close.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
-
     avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
-
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 def calculate_ma(close: pd.Series, period: int = 20):
-    """Calculates Simple Moving Average (SMA)"""
     return close.rolling(window=period).mean()
+
+def detect_candlestick(df):
+    """Detects basic candlestick patterns on the last row"""
+    if len(df) < 2: return "Neutral"
+    
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    o, h, l, c = curr['open'], curr['high'], curr['low'], curr['close']
+    body = abs(c - o)
+    candle_range = h - l
+    if candle_range == 0: return "Neutral"
+    
+    body_percent = body / candle_range
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    
+    # 1. HAMMER (Bullish)
+    if lower_wick > (2 * body) and upper_wick < (0.1 * candle_range) and body_percent < 0.4:
+        return "Hammer (Bullish)"
+        
+    # 2. SHOOTING STAR (Bearish)
+    if upper_wick > (2 * body) and lower_wick < (0.1 * candle_range) and body_percent < 0.4:
+        return "Shooting Star (Bearish)"
+        
+    # 3. BULLISH ENGULFING
+    if c > o and prev['close'] < prev['open'] and c > prev['open'] and o < prev['close']:
+        return "Bullish Engulfing"
+        
+    # 4. BEARISH ENGULFING
+    if c < o and prev['close'] > prev['open'] and c < prev['open'] and o > prev['close']:
+        return "Bearish Engulfing"
+        
+    return "Neutral"
+
+def calculate_confluence_score(rsi, ma_dist_pct, sma50, sma200):
+    """Calculates a Super-Signal score from 0-100"""
+    score = 50 # Baseline
+    
+    # RSI Contribution (Oversold is good for scoring buy setups)
+    if not pd.isna(rsi):
+        if rsi < 30: score += 25
+        elif rsi < 40: score += 15
+        elif rsi > 70: score -= 20
+        elif rsi > 60: score -= 10
+        
+    # MA distance (Price above MA is bullish)
+    if not pd.isna(ma_dist_pct):
+        if ma_dist_pct > 0: score += 10
+        if ma_dist_pct > 5: score += 5
+        
+    # SMAs (SMA 50 > 200 is Golden)
+    if not pd.isna(sma50) and not pd.isna(sma200):
+        if sma50 > sma200: score += 15
+        
+    return max(0, min(100, score))
 
 # -------------------------------------------------
 # LOAD TECHNICAL DATA ON STARTUP
 # -------------------------------------------------
 @app.on_event("startup")
 async def load_technical_data():
-    global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE, CROSSOVER_LATEST_CACHE
+    global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE, CROSSOVER_LATEST_CACHE, CONFLUENCE_LATEST_CACHE, CANDLESTICK_LATEST_CACHE
 
     try:
         print("🔄 Fetching Technical data from Google Sheets...")
@@ -426,119 +483,97 @@ async def load_technical_data():
 
         if resp.status_code != 200:
             print(f"❌ Technical CSV fetch failed: {resp.status_code}")
-            # Caches are already initialized globally to empty DataFrames
             return
 
-        print(f"✅ CSV fetched successfully ({len(resp.text)} bytes)")
         df = pd.read_csv(StringIO(resp.text))
-        
-        # Normalize columns
         df.columns = df.columns.str.strip().str.lower()
-
-        required = {"date", "symbol", "close"}
+        
+        # Ensure we have OHLCV
+        required = {"date", "symbol", "open", "high", "low", "close"}
         if not required.issubset(df.columns):
-            print("❌ Missing required columns:", df.columns.tolist())
-            # Caches are already initialized globally to empty DataFrames
+            print(f"❌ Missing required columns: {required - set(df.columns)}")
             return
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        for col in ["open", "high", "low", "close"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        
         df = df.dropna(subset=["date", "symbol", "close"])
         df = df.sort_values(["symbol", "date"])
-        
         TECHNICAL_RAW_CACHE = df.copy()
-        print(f"📊 Total Data Rows: {len(df)} across {df['symbol'].nunique()} symbols")
 
-        rsi_results = []
-        ma_results = []
-        crossover_results = []
-
-        FOR_CROSSOVER = MA_200 + 5 # Need extra data for previous day's cross detection
+        rsi_list, ma_list, cross_list, conf_list, candle_list = [], [], [], [], []
 
         for symbol, g in df.groupby("symbol"):
             g = g.copy()
             data_len = len(g)
+            if data_len < 2: continue
             
-            # RSI Calculation
-            if data_len >= RSI_PERIOD + 1:
-                g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
-                last_rsi = g.iloc[-1]
-                if not pd.isna(last_rsi["rsi"]):
-                    rsi_results.append({
-                        "symbol": str(symbol).upper(),
-                        "close": float(last_rsi["close"]),
-                        "rsi": round(float(last_rsi["rsi"]), 2)
-                    })
+            # 1. Indicators
+            g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
+            g["ma20"] = calculate_ma(g["close"], MA_PERIOD)
+            g["sma50"] = calculate_ma(g["close"], MA_50)
+            g["sma200"] = calculate_ma(g["close"], MA_200)
+            
+            last = g.iloc[-1]
+            prev = g.iloc[-2]
+            
+            # 2. RSI Results
+            if not pd.isna(last["rsi"]):
+                rsi_list.append({"symbol": str(symbol).upper(), "close": float(last["close"]), "rsi": round(float(last["rsi"]), 2)})
 
-            # MA 20 Calculation
-            if data_len >= MA_PERIOD:
-                g["ma_20"] = calculate_ma(g["close"], MA_PERIOD)
-                last_ma = g.iloc[-1]
-                if "ma_20" in g.columns and not pd.isna(last_ma["ma_20"]):
-                    ma_results.append({
-                        "symbol": str(symbol).upper(),
-                        "close": float(last_ma["close"]),
-                        "ma": round(float(last_ma["ma_20"]), 2),
-                        "diff": round(float(last_ma["close"] - last_ma["ma_20"]), 2),
-                        "percent_diff": round(float((last_ma["close"] - last_ma["ma_20"]) / last_ma["ma_20"] * 100), 2)
-                    })
+            # 3. MA 20 Results
+            ma_dist_pct = 0
+            if not pd.isna(last["ma20"]):
+                ma_dist_pct = (last["close"] - last["ma20"]) / last["ma20"] * 100
+                ma_list.append({
+                    "symbol": str(symbol).upper(), "close": float(last["close"]),
+                    "ma": round(float(last["ma20"]), 2), "percent_diff": round(float(ma_dist_pct), 2)
+                })
 
-            # MA 50/200 Crossover Detection
-            if data_len >= MA_200:
-                g["sma50"] = calculate_ma(g["close"], MA_50)
-                g["sma200"] = calculate_ma(g["close"], MA_200)
+            # 4. Crossover Results
+            if data_len >= MA_200 and not pd.isna(last["sma200"]):
+                signal = "Golden Cross" if (prev["sma50"] <= prev["sma200"] and last["sma50"] > last["sma200"]) else \
+                         "Death Cross" if (prev["sma50"] >= prev["sma200"] and last["sma50"] < last["sma200"]) else \
+                         "Bullish Alignment" if last["sma50"] > last["sma200"] else "Bearish Alignment"
                 
-                # Check for crossover in the last 2 records
-                if len(g) >= 2:
-                    curr = g.iloc[-1]
-                    prev = g.iloc[-2]
-                    
-                    if not pd.isna(curr["sma50"]) and not pd.isna(curr["sma200"]):
-                        signal = "Neutral"
-                        is_cross = False
-                        
-                        # Detect Golden Cross (50 crosses ABOVE 200)
-                        if prev["sma50"] <= prev["sma200"] and curr["sma50"] > curr["sma200"]:
-                            signal = "Golden Cross"
-                            is_cross = True
-                        # Detect Death Cross (50 crosses BELOW 200)
-                        elif prev["sma50"] >= prev["sma200"] and curr["sma50"] < curr["sma200"]:
-                            signal = "Death Cross"
-                            is_cross = True
-                        # Ongoing trend alignment
-                        elif curr["sma50"] > curr["sma200"]:
-                            signal = "Bullish Alignment"
-                        else:
-                            signal = "Bearish Alignment"
+                cross_list.append({
+                    "symbol": str(symbol).upper(), "close": float(last["close"]),
+                    "sma50": round(float(last["sma50"]), 2), "sma200": round(float(last["sma200"]), 2),
+                    "signal": signal, "is_cross": ("Cross" in signal and "Alignment" not in signal)
+                })
 
-                        crossover_results.append({
-                            "symbol": str(symbol).upper(),
-                            "close": float(curr["close"]),
-                            "sma50": round(float(curr["sma50"]), 2),
-                            "sma200": round(float(curr["sma200"]), 2),
-                            "signal": signal,
-                            "is_cross": is_cross,
-                            "distance": round(float(curr["sma50"] - curr["sma200"]), 2)
-                        })
+            # 5. Candlestick Results
+            pattern = detect_candlestick(g)
+            if pattern != "Neutral":
+                candle_list.append({"symbol": str(symbol).upper(), "close": float(last["close"]), "pattern": pattern})
 
-        RSI_LATEST_CACHE = pd.DataFrame(rsi_results)
-        MA_LATEST_CACHE = pd.DataFrame(ma_results)
-        CROSSOVER_LATEST_CACHE = pd.DataFrame(crossover_results)
+            # 6. Confluence Result
+            score = calculate_confluence_score(last["rsi"], ma_dist_pct, last["sma50"], last["sma200"])
+            conf_list.append({
+                "symbol": str(symbol).upper(), "close": float(last["close"]), "score": int(score),
+                "rsi": round(float(last["rsi"]), 2) if not pd.isna(last["rsi"]) else None,
+                "trend": "Bullish" if score > 60 else "Bearish" if score < 40 else "Neutral"
+            })
 
-        print(f"✅ Technical Data Summary:")
-        print(f"   RSI (14): {len(RSI_LATEST_CACHE)} symbols")
-        print(f"   MA (20): {len(MA_LATEST_CACHE)} symbols")
-        print(f"   Crossovers (50/200): {len(CROSSOVER_LATEST_CACHE)} symbols")
+        RSI_LATEST_CACHE = pd.DataFrame(rsi_list)
+        MA_LATEST_CACHE = pd.DataFrame(ma_list)
+        CROSSOVER_LATEST_CACHE = pd.DataFrame(cross_list)
+        CANDLESTICK_LATEST_CACHE = pd.DataFrame(candle_list)
+        CONFLUENCE_LATEST_CACHE = pd.DataFrame(conf_list)
+
+        print(f"✅ Technical Data Summary: RSI:{len(rsi_list)}, MA:{len(ma_list)}, Conf:{len(conf_list)}")
 
     except Exception as e:
-        print("❌ Technical Startup exception:", str(e))
-        import traceback
-        traceback.print_exc()
+        print("❌ Startup Load Error:", str(e))
+        import traceback; traceback.print_exc()
         # Ensure caches are empty if an error occurs during processing
         TECHNICAL_RAW_CACHE = pd.DataFrame()
         RSI_LATEST_CACHE = pd.DataFrame()
         MA_LATEST_CACHE = pd.DataFrame()
         CROSSOVER_LATEST_CACHE = pd.DataFrame()
+        CONFLUENCE_LATEST_CACHE = pd.DataFrame()
+        CANDLESTICK_LATEST_CACHE = pd.DataFrame()
 
 # -------------------------------------------------
 # TECHNICAL ENDPOINTS (RSI & MA)
@@ -562,6 +597,20 @@ def ma_status():
 @app.get("/crossovers/all")
 def crossovers_all():
     return CROSSOVER_LATEST_CACHE.to_dict(orient="records")
+
+@app.get("/confluence/all")
+def confluence_all():
+    return CONFLUENCE_LATEST_CACHE.sort_values("score", ascending=False).to_dict(orient="records")
+
+@app.get("/candlesticks/all")
+def candlesticks_all():
+    return CANDLESTICK_LATEST_CACHE.to_dict(orient="records")
+
+@app.get("/refresh-technical")
+async def refresh_technical():
+    """Trigger a manual refresh of all technical data from Google Sheets"""
+    await load_technical_data()
+    return {"status": "success", "message": "Technical data refreshed."}
 
 @app.get("/rsi/filter")
 def rsi_filter(
