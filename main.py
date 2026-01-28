@@ -460,6 +460,17 @@ async def load_rsi_data():
         print("❌ RSI startup exception:", str(e))
         RSI_LATEST_CACHE = pd.DataFrame()
 
+@app.get("/rsi/debug/symbols")
+def rsi_debug_symbols():
+    return (
+        RSI_RAW_CACHE
+        .groupby("symbol")
+        .size()
+        .sort_values(ascending=False)
+        .head(20)
+        .to_dict()
+    )
+
 # -------------------------------------------------
 # RSI ENDPOINTS
 # -------------------------------------------------
