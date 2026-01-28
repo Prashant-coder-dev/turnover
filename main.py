@@ -385,86 +385,126 @@ async def index_1d_chart():
     return resp.json()
 
 # -------------------------------------------------
-# RSI Engine
+# RSI CALCULATION
 # -------------------------------------------------
 def calculate_rsi(close: pd.Series, period: int = 14):
     delta = close.diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
 
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
 
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+
     return rsi
 
+# -------------------------------------------------
+# LOAD RSI ON STARTUP (RAILWAY SAFE)
+# -------------------------------------------------
 @app.on_event("startup")
 async def load_rsi_data():
     global RSI_RAW_CACHE, RSI_LATEST_CACHE
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(GOOGLE_SHEET_CSV)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(GOOGLE_SHEET_CSV)
 
-    if resp.status_code != 200:
-        print("❌ Failed to load RSI sheet")
-        return
+        if resp.status_code != 200:
+            print("❌ Failed to fetch RSI sheet")
+            return
 
-    df = pd.read_csv(StringIO(resp.text))
+        df = pd.read_csv(StringIO(resp.text))
 
-    # Expected columns: Date, Symbol, Close
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values(["Symbol", "Date"])
+        required_cols = {"Date", "Symbol", "Close"}
+        if not required_cols.issubset(df.columns):
+            print("❌ Sheet missing required columns")
+            return
 
-    RSI_RAW_CACHE = df
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Symbol"] = df["Symbol"].astype(str).str.upper()
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
 
-    results = []
+        df = df.dropna(subset=["Date", "Symbol", "Close"])
+        df = df.sort_values(["Symbol", "Date"])
 
-    for symbol, g in df.groupby("Symbol"):
-        if len(g) < RSI_PERIOD + 1:
-            continue
+        RSI_RAW_CACHE = df
 
-        g["RSI"] = calculate_rsi(g["Close"], RSI_PERIOD)
-        last = g.iloc[-1]
+        results = []
 
-        results.append({
-            "symbol": symbol,
-            "close": float(last["Close"]),
-            "rsi": round(float(last["RSI"]), 2)
-        })
+        for symbol, g in df.groupby("Symbol"):
+            if len(g) < RSI_PERIOD + 1:
+                continue
 
-    RSI_LATEST_CACHE = pd.DataFrame(results)
+            g = g.copy()
+            g["RSI"] = calculate_rsi(g["Close"], RSI_PERIOD)
 
-    print(f"✅ RSI Loaded for {len(RSI_LATEST_CACHE)} symbols")
+            g = g.dropna(subset=["RSI"])
+            if g.empty:
+                continue
 
+            last = g.iloc[-1]
+
+            results.append({
+                "symbol": symbol,
+                "close": round(float(last["Close"]), 2),
+                "rsi": round(float(last["RSI"]), 2)
+            })
+
+        RSI_LATEST_CACHE = pd.DataFrame(results)
+
+        print(f"✅ RSI loaded for {len(RSI_LATEST_CACHE)} symbols")
+
+    except Exception as e:
+        print("❌ RSI startup error:", e)
+
+# -------------------------------------------------
+# RSI ENDPOINTS
+# -------------------------------------------------
 @app.get("/rsi/all")
 def rsi_all():
-    if RSI_LATEST_CACHE is None:
+    if RSI_LATEST_CACHE is None or RSI_LATEST_CACHE.empty:
         raise HTTPException(status_code=503, detail="RSI data not ready")
     return RSI_LATEST_CACHE.to_dict(orient="records")
 
 @app.get("/rsi/symbol")
 def rsi_symbol(symbol: str = Query(...)):
-    df = RSI_LATEST_CACHE
-    row = df[df["symbol"] == symbol.upper()]
+    if RSI_LATEST_CACHE is None:
+        raise HTTPException(status_code=503, detail="RSI data not ready")
+
+    symbol = symbol.upper()
+    row = RSI_LATEST_CACHE[RSI_LATEST_CACHE["symbol"] == symbol]
 
     if row.empty:
-        raise HTTPException(status_code=404, detail="Symbol not found")
+        raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not found")
 
-    return row.to_dict(orient="records")[0]
+    return row.iloc[0].to_dict()
 
 @app.get("/rsi/filter")
 def rsi_filter(
-    min: float = Query(None, description="Minimum RSI"),
-    max: float = Query(None, description="Maximum RSI")
+    min: float | None = Query(None),
+    max: float | None = Query(None)
 ):
+    if RSI_LATEST_CACHE is None:
+        raise HTTPException(status_code=503, detail="RSI data not ready")
+
     df = RSI_LATEST_CACHE.copy()
 
     if min is not None:
         df = df[df["rsi"] >= min]
-
     if max is not None:
         df = df[df["rsi"] <= max]
 
     return df.sort_values("rsi").to_dict(orient="records")
+
+# -------------------------------------------------
+# ROOT
+# -------------------------------------------------
+@app.get("/")
+def root():
+    return {
+        "status": "NEPSE API running",
+        "rsi_symbols": 0 if RSI_LATEST_CACHE is None else len(RSI_LATEST_CACHE)
+    }
