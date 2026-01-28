@@ -45,9 +45,10 @@ MA_PERIOD = 20
 MA_50 = 50
 MA_200 = 200
 
-RSI_LATEST_CACHE = None
-MA_LATEST_CACHE = None
-CROSSOVER_LATEST_CACHE = None
+# Initialize as empty DataFrames (Prevents 503 during loading)
+RSI_LATEST_CACHE = pd.DataFrame()
+MA_LATEST_CACHE = pd.DataFrame()
+CROSSOVER_LATEST_CACHE = pd.DataFrame()
 TECHNICAL_RAW_CACHE = None
 
 # -------------------------------------------------
@@ -416,7 +417,7 @@ def calculate_ma(close: pd.Series, period: int = 20):
 # -------------------------------------------------
 @app.on_event("startup")
 async def load_technical_data():
-    global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE
+    global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE, CROSSOVER_LATEST_CACHE
 
     try:
         print("🔄 Fetching Technical data from Google Sheets...")
@@ -425,9 +426,7 @@ async def load_technical_data():
 
         if resp.status_code != 200:
             print(f"❌ Technical CSV fetch failed: {resp.status_code}")
-            TECHNICAL_RAW_CACHE = pd.DataFrame()
-            RSI_LATEST_CACHE = pd.DataFrame()
-            MA_LATEST_CACHE = pd.DataFrame()
+            # Caches are already initialized globally to empty DataFrames
             return
 
         print(f"✅ CSV fetched successfully ({len(resp.text)} bytes)")
@@ -439,6 +438,7 @@ async def load_technical_data():
         required = {"date", "symbol", "close"}
         if not required.issubset(df.columns):
             print("❌ Missing required columns:", df.columns.tolist())
+            # Caches are already initialized globally to empty DataFrames
             return
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -447,6 +447,7 @@ async def load_technical_data():
         df = df.sort_values(["symbol", "date"])
         
         TECHNICAL_RAW_CACHE = df.copy()
+        print(f"📊 Total Data Rows: {len(df)} across {df['symbol'].nunique()} symbols")
 
         rsi_results = []
         ma_results = []
@@ -456,9 +457,10 @@ async def load_technical_data():
 
         for symbol, g in df.groupby("symbol"):
             g = g.copy()
+            data_len = len(g)
             
             # RSI Calculation
-            if len(g) >= RSI_PERIOD + 1:
+            if data_len >= RSI_PERIOD + 1:
                 g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
                 last_rsi = g.iloc[-1]
                 if not pd.isna(last_rsi["rsi"]):
@@ -469,7 +471,7 @@ async def load_technical_data():
                     })
 
             # MA 20 Calculation
-            if len(g) >= MA_PERIOD:
+            if data_len >= MA_PERIOD:
                 g["ma_20"] = calculate_ma(g["close"], MA_PERIOD)
                 last_ma = g.iloc[-1]
                 if "ma_20" in g.columns and not pd.isna(last_ma["ma_20"]):
@@ -482,7 +484,7 @@ async def load_technical_data():
                     })
 
             # MA 50/200 Crossover Detection
-            if len(g) >= MA_200:
+            if data_len >= MA_200:
                 g["sma50"] = calculate_ma(g["close"], MA_50)
                 g["sma200"] = calculate_ma(g["close"], MA_200)
                 
@@ -523,15 +525,17 @@ async def load_technical_data():
         MA_LATEST_CACHE = pd.DataFrame(ma_results)
         CROSSOVER_LATEST_CACHE = pd.DataFrame(crossover_results)
 
-        print(f"✅ Technical Data Loaded:")
-        print(f"   RSI: {len(RSI_LATEST_CACHE)} symbols")
-        print(f"   MA-20: {len(MA_LATEST_CACHE)} symbols")
-        print(f"   Crossovers: {len(CROSSOVER_LATEST_CACHE)} symbols")
+        print(f"✅ Technical Data Summary:")
+        print(f"   RSI (14): {len(RSI_LATEST_CACHE)} symbols")
+        print(f"   MA (20): {len(MA_LATEST_CACHE)} symbols")
+        print(f"   Crossovers (50/200): {len(CROSSOVER_LATEST_CACHE)} symbols")
 
     except Exception as e:
-        print("❌ Startup exception:", str(e))
+        print("❌ Technical Startup exception:", str(e))
         import traceback
         traceback.print_exc()
+        # Ensure caches are empty if an error occurs during processing
+        TECHNICAL_RAW_CACHE = pd.DataFrame()
         RSI_LATEST_CACHE = pd.DataFrame()
         MA_LATEST_CACHE = pd.DataFrame()
         CROSSOVER_LATEST_CACHE = pd.DataFrame()
@@ -541,33 +545,22 @@ async def load_technical_data():
 # -------------------------------------------------
 @app.get("/rsi/all")
 def rsi_all():
-    if RSI_LATEST_CACHE is None or RSI_LATEST_CACHE.empty:
-        raise HTTPException(status_code=503, detail="RSI data not ready")
     return RSI_LATEST_CACHE.to_dict(orient="records")
-
 
 @app.get("/ma/all")
 def ma_all():
-    if MA_LATEST_CACHE is None or MA_LATEST_CACHE.empty:
-        raise HTTPException(status_code=503, detail="MA data not ready")
     return MA_LATEST_CACHE.to_dict(orient="records")
 
 @app.get("/ma/status")
 def ma_status():
-    if MA_LATEST_CACHE is None:
-        return {"status": "not_loaded"}
-    if MA_LATEST_CACHE.empty:
-        return {"status": "loaded_but_empty"}
     return {
-        "status": "ready",
+        "status": "ready" if not MA_LATEST_CACHE.empty else "not_ready",
         "symbols": len(MA_LATEST_CACHE),
         "period": MA_PERIOD
     }
 
 @app.get("/crossovers/all")
 def crossovers_all():
-    if CROSSOVER_LATEST_CACHE is None or CROSSOVER_LATEST_CACHE.empty:
-        raise HTTPException(status_code=503, detail="Crossover data not ready")
     return CROSSOVER_LATEST_CACHE.to_dict(orient="records")
 
 @app.get("/rsi/filter")
