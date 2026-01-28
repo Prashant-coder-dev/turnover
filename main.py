@@ -32,7 +32,7 @@ NEPALIPAISA_SUBINDEX_URL = "https://nepalipaisa.com/api/GetSubIndexLive"
 SHAREHUB_ANNOUNCEMENT_URL = "https://sharehubnepal.com/data/api/v1/announcement"
 
 # -------------------------------------------------
-# RSI – Google Sheet Config
+# TECHNICAL DATA CONFIG (RSI & MA)
 # -------------------------------------------------
 GOOGLE_SHEET_CSV = (
     "https://docs.google.com/spreadsheets/d/"
@@ -41,8 +41,11 @@ GOOGLE_SHEET_CSV = (
 )
 
 RSI_PERIOD = 14
-RSI_RAW_CACHE = None
+MA_PERIOD = 20  # Default 20-day Simple Moving Average
+
 RSI_LATEST_CACHE = None
+MA_LATEST_CACHE = None
+TECHNICAL_RAW_CACHE = None
 
 # -------------------------------------------------
 # Root Endpoint
@@ -62,14 +65,15 @@ def root():
             "/stock-chart/{symbol}?time=1D|1W|1M|3M|6M|1Y",
             "/stock-chart/index/1D",
             "/rsi/all",
-            "/rsi/symbol?symbol=SYMBOL",
             "/rsi/filter?min=30&max=70",
-            "/rsi/status"
+            "/rsi/status",
+            "/ma/all",
+            "/ma/status"
         ]
     }
 
 # -------------------------------------------------
-# Nepselytics Homepage Data
+# ShareHub Homepage Data
 # -------------------------------------------------
 @app.get("/homepage-data")
 async def homepage_data():
@@ -385,11 +389,10 @@ async def index_1d_chart():
     return resp.json()
 
 # -------------------------------------------------
-# RSI CALCULATION
+# TECHNICAL CALCULATIONS
 # -------------------------------------------------
 def calculate_rsi(close: pd.Series, period: int = 14):
     delta = close.diff()
-
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
 
@@ -398,93 +401,95 @@ def calculate_rsi(close: pd.Series, period: int = 14):
 
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-
     return rsi
 
+def calculate_ma(close: pd.Series, period: int = 20):
+    """Calculates Simple Moving Average (SMA)"""
+    return close.rolling(window=period).mean()
+
 # -------------------------------------------------
-# LOAD RSI ON STARTUP (RAILWAY SAFE)
+# LOAD TECHNICAL DATA ON STARTUP
 # -------------------------------------------------
 @app.on_event("startup")
-async def load_rsi_data():
-    global RSI_RAW_CACHE, RSI_LATEST_CACHE
+async def load_technical_data():
+    global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE
 
     try:
-        print("🔄 Fetching RSI data from Google Sheets...")
+        print("🔄 Fetching Technical data from Google Sheets...")
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             resp = await client.get(GOOGLE_SHEET_CSV)
 
         if resp.status_code != 200:
-            print(f"❌ RSI CSV fetch failed: {resp.status_code}")
-            print(f"   Response: {resp.text[:200]}")
-            RSI_RAW_CACHE = pd.DataFrame()
+            print(f"❌ Technical CSV fetch failed: {resp.status_code}")
+            TECHNICAL_RAW_CACHE = pd.DataFrame()
             RSI_LATEST_CACHE = pd.DataFrame()
+            MA_LATEST_CACHE = pd.DataFrame()
             return
 
         print(f"✅ CSV fetched successfully ({len(resp.text)} bytes)")
         df = pd.read_csv(StringIO(resp.text))
-        print(f"📊 Raw data loaded: {len(df)} rows, columns: {df.columns.tolist()}")
-
-        # Normalize column names (CRITICAL)
+        
+        # Normalize columns
         df.columns = df.columns.str.strip().str.lower()
 
         required = {"date", "symbol", "close"}
         if not required.issubset(df.columns):
             print("❌ Missing required columns:", df.columns.tolist())
-            print(f"   Expected: {required}")
-            RSI_RAW_CACHE = pd.DataFrame()
-            RSI_LATEST_CACHE = pd.DataFrame()
             return
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
-
         df = df.dropna(subset=["date", "symbol", "close"])
         df = df.sort_values(["symbol", "date"])
         
-        # Store raw cache for debugging
-        RSI_RAW_CACHE = df.copy()
-        print(f"📦 Raw cache stored: {len(RSI_RAW_CACHE)} rows after cleaning")
+        TECHNICAL_RAW_CACHE = df.copy()
 
-        results = []
-        symbols_processed = 0
-        symbols_skipped = 0
+        rsi_results = []
+        ma_results = []
 
         for symbol, g in df.groupby("symbol"):
-            if len(g) < RSI_PERIOD + 1:
-                symbols_skipped += 1
-                continue
+            g = g.copy()
+            
+            # RSI Calculation
+            if len(g) >= RSI_PERIOD + 1:
+                g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
+                last_rsi = g.iloc[-1]
+                if not pd.isna(last_rsi["rsi"]):
+                    rsi_results.append({
+                        "symbol": str(symbol).upper(),
+                        "close": float(last_rsi["close"]),
+                        "rsi": round(float(last_rsi["rsi"]), 2)
+                    })
 
-            g = g.copy()  # Avoid SettingWithCopyWarning
-            g["rsi"] = calculate_rsi(g["close"], RSI_PERIOD)
-            last = g.iloc[-1]
+            # MA Calculation
+            if len(g) >= MA_PERIOD:
+                g["ma"] = calculate_ma(g["close"], MA_PERIOD)
+                last_ma = g.iloc[-1]
+                if not pd.isna(last_ma["ma"]):
+                    ma_results.append({
+                        "symbol": str(symbol).upper(),
+                        "close": float(last_ma["close"]),
+                        "ma": round(float(last_ma["ma"]), 2),
+                        "diff": round(float(last_ma["close"] - last_ma["ma"]), 2),
+                        "percent_diff": round(float((last_ma["close"] - last_ma["ma"]) / last_ma["ma"] * 100), 2)
+                    })
 
-            if pd.isna(last["rsi"]):
-                symbols_skipped += 1
-                continue
+        RSI_LATEST_CACHE = pd.DataFrame(rsi_results)
+        MA_LATEST_CACHE = pd.DataFrame(ma_results)
 
-            results.append({
-                "symbol": str(symbol).upper(),
-                "close": float(last["close"]),
-                "rsi": round(float(last["rsi"]), 2)
-            })
-            symbols_processed += 1
-
-        RSI_LATEST_CACHE = pd.DataFrame(results)
-
-        print(f"✅ RSI Loaded for {len(RSI_LATEST_CACHE)} symbols")
-        print(f"   Processed: {symbols_processed}, Skipped: {symbols_skipped}")
-        if len(RSI_LATEST_CACHE) > 0:
-            print(f"   Sample symbols: {RSI_LATEST_CACHE['symbol'].head(5).tolist()}")
+        print(f"✅ Technical Data Loaded:")
+        print(f"   RSI: {len(RSI_LATEST_CACHE)} symbols")
+        print(f"   MA-{MA_PERIOD}: {len(MA_LATEST_CACHE)} symbols")
 
     except Exception as e:
-        print("❌ RSI startup exception:", str(e))
+        print("❌ Startup exception:", str(e))
         import traceback
         traceback.print_exc()
-        RSI_RAW_CACHE = pd.DataFrame()
         RSI_LATEST_CACHE = pd.DataFrame()
+        MA_LATEST_CACHE = pd.DataFrame()
 
 # -------------------------------------------------
-# RSI ENDPOINTS
+# TECHNICAL ENDPOINTS (RSI & MA)
 # -------------------------------------------------
 @app.get("/rsi/all")
 def rsi_all():
@@ -492,18 +497,24 @@ def rsi_all():
         raise HTTPException(status_code=503, detail="RSI data not ready")
     return RSI_LATEST_CACHE.to_dict(orient="records")
 
-@app.get("/rsi/symbol")
-def rsi_symbol(symbol: str = Query(...)):
-    if RSI_LATEST_CACHE is None:
-        raise HTTPException(status_code=503, detail="RSI data not ready")
 
-    symbol = symbol.upper()
-    row = RSI_LATEST_CACHE[RSI_LATEST_CACHE["symbol"] == symbol]
+@app.get("/ma/all")
+def ma_all():
+    if MA_LATEST_CACHE is None or MA_LATEST_CACHE.empty:
+        raise HTTPException(status_code=503, detail="MA data not ready")
+    return MA_LATEST_CACHE.to_dict(orient="records")
 
-    if row.empty:
-        raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not found")
-
-    return row.iloc[0].to_dict()
+@app.get("/ma/status")
+def ma_status():
+    if MA_LATEST_CACHE is None:
+        return {"status": "not_loaded"}
+    if MA_LATEST_CACHE.empty:
+        return {"status": "loaded_but_empty"}
+    return {
+        "status": "ready",
+        "symbols": len(MA_LATEST_CACHE),
+        "period": MA_PERIOD
+    }
 
 @app.get("/rsi/filter")
 def rsi_filter(
