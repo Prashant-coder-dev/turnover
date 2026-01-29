@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 httpx
-httpx
 pandas
 numpy
+python-multipart

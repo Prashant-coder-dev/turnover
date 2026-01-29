@@ -7,6 +7,7 @@ import numpy as np
 from io import StringIO
 import json
 from fastapi.responses import JSONResponse
+import asyncio
 
 app = FastAPI(title="NEPSE Unified Market Data API")
 
@@ -452,31 +453,60 @@ def detect_candlestick(df):
     return "Neutral"
 
 def calculate_confluence_score(rsi, ma_dist_pct, sma50, sma200):
-    """Calculates a Super-Signal score from 0-100"""
+    """Calculates a Super-Signal score from 0-100 and returns breakdown"""
     score = 50 # Baseline
+    breakdown = {"baseline": 50, "rsi": 0, "ma": 0, "trend": 0}
     
-    # RSI Contribution (Oversold is good for scoring buy setups)
+    # RSI Contribution
     if not pd.isna(rsi):
-        if rsi < 30: score += 25
-        elif rsi < 40: score += 15
-        elif rsi > 70: score -= 20
-        elif rsi > 60: score -= 10
+        if rsi < 30: 
+            score += 25
+            breakdown["rsi"] = 25
+        elif rsi < 40: 
+            score += 15
+            breakdown["rsi"] = 15
+        elif rsi > 70: 
+            score -= 20
+            breakdown["rsi"] = -20
+        elif rsi > 60: 
+            score -= 10
+            breakdown["rsi"] = -10
         
     # MA distance (Price above MA is bullish)
     if not pd.isna(ma_dist_pct):
-        if ma_dist_pct > 0: score += 10
-        if ma_dist_pct > 5: score += 5
+        if ma_dist_pct > 0: 
+            score += 10
+            breakdown["ma"] += 10
+        if ma_dist_pct > 5: 
+            score += 5
+            breakdown["ma"] += 5
         
     # SMAs (SMA 50 > 200 is Golden)
     if not pd.isna(sma50) and not pd.isna(sma200):
-        if sma50 > sma200: score += 15
+        if sma50 > sma200: 
+            score += 15
+            breakdown["trend"] = 15
         
-    return max(0, min(100, score))
+    final_score = max(0, min(100, score))
+    return final_score, breakdown
 
 # -------------------------------------------------
-# LOAD TECHNICAL DATA ON STARTUP
+# BACKGROUND TASK FOR AUTO-REFRESH
 # -------------------------------------------------
-@app.on_event("startup")
+async def auto_refresh_technical_data():
+    """Background task that refreshes Google Sheet data every 60 seconds"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Wait 60 seconds
+            print("🔄 Auto-refreshing technical data...")
+            await load_technical_data()
+        except Exception as e:
+            print(f"❌ Auto-refresh error: {str(e)}")
+            # Continue the loop even if there's an error
+
+# -------------------------------------------------
+# LOAD TECHNICAL DATA FUNCTION
+# -------------------------------------------------
 async def load_technical_data():
     global TECHNICAL_RAW_CACHE, RSI_LATEST_CACHE, MA_LATEST_CACHE, CROSSOVER_LATEST_CACHE, CONFLUENCE_LATEST_CACHE, CANDLESTICK_LATEST_CACHE, MOMENTUM_LATEST_CACHE
 
@@ -558,9 +588,12 @@ async def load_technical_data():
                 candle_list.append({"symbol": str(symbol).upper(), "close": float(last["close"]), "pattern": pattern})
 
             # Confluence Result
-            score = calculate_confluence_score(last["rsi"], ma_dist_pct, last["sma50"], last["sma200"])
+            score, breakdown = calculate_confluence_score(last["rsi"], ma_dist_pct, last["sma50"], last["sma200"])
             conf_list.append({
-                "symbol": str(symbol).upper(), "close": float(last["close"]), "score": int(score),
+                "symbol": str(symbol).upper(), 
+                "close": float(last["close"]), 
+                "score": int(score),
+                "breakdown": breakdown,
                 "rsi": round(float(last["rsi"]), 2) if not pd.isna(last["rsi"]) else None,
                 "trend": "Bullish" if score > 60 else "Bearish" if score < 40 else "Neutral"
             })
@@ -615,7 +648,7 @@ async def load_technical_data():
         print(f"✅ Technical Data Loaded: RSI:{len(rsi_list)}, MA:{len(ma_list)}, Conf:{len(conf_list)}, Mom:{len(momentum_list)}")
 
     except Exception as e:
-        print("❌ Startup Load Error:", str(e))
+        print("❌ Load Error:", str(e))
         import traceback; traceback.print_exc()
         # Ensure caches are empty if an error occurs during processing
         TECHNICAL_RAW_CACHE = pd.DataFrame()
@@ -625,6 +658,19 @@ async def load_technical_data():
         CONFLUENCE_LATEST_CACHE = pd.DataFrame()
         CANDLESTICK_LATEST_CACHE = pd.DataFrame()
         MOMENTUM_LATEST_CACHE = pd.DataFrame()
+
+# -------------------------------------------------
+# STARTUP EVENT - Load data and start background task
+# -------------------------------------------------
+@app.on_event("startup")
+async def startup_event():
+    """Load initial data and start the auto-refresh background task"""
+    # Load data immediately on startup
+    await load_technical_data()
+    
+    # Start the background refresh task
+    asyncio.create_task(auto_refresh_technical_data())
+    print("✅ Auto-refresh task started (refreshes every 60 seconds)")
 
 # -------------------------------------------------
 # TECHNICAL ENDPOINTS (RSI & MA)
