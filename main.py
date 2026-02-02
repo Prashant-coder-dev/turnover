@@ -33,6 +33,8 @@ NEPALIPAISA_INDEX_URL = "https://nepalipaisa.com/api/GetIndexLive"
 NEPALIPAISA_SUBINDEX_URL = "https://nepalipaisa.com/api/GetSubIndexLive"
 
 SHAREHUB_ANNOUNCEMENT_URL = "https://sharehubnepal.com/data/api/v1/announcement"
+SHAREHUB_OFFERING_URL = "https://sharehubnepal.com/data/api/v1/public-offering"
+SHAREHUB_DIVIDEND_URL = "https://sharehubnepal.com/data/api/v1/dividend"
 
 # -------------------------------------------------
 # TECHNICAL DATA CONFIG (RSI & MA)
@@ -83,6 +85,14 @@ def root():
             "/confluence/all",
             "/candlesticks/all",
             "/momentum/all",
+            "/ipo/general",
+            "/ipo/local",
+            "/ipo/foreign",
+            "/right-share",
+            "/fpo",
+            "/mutual-fund-offering",
+            "/debenture-offering",
+            "/dividends",
             "/refresh-technical"
         ]
     }
@@ -341,6 +351,63 @@ async def announcements(
             detail="Failed to fetch ShareHub announcements"
         )
 
+    return resp.json()
+
+# -------------------------------------------------
+# ShareHub Offering Endpoints (IPO, Right, FPO, etc.)
+# -------------------------------------------------
+async def fetch_offerings(type: int, for_category: int, size: int = 5):
+    params = {"size": size, "type": type, "for": for_category}
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(SHAREHUB_OFFERING_URL, params=params, headers=headers)
+    
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="Failed to fetch offerings")
+    return resp.json()
+
+@app.get("/ipo/general")
+async def ipo_general(size: int = 5):
+    return await fetch_offerings(type=0, for_category=2, size=size)
+
+@app.get("/ipo/local")
+async def ipo_local(size: int = 5):
+    return await fetch_offerings(type=0, for_category=0, size=size)
+
+@app.get("/ipo/foreign")
+async def ipo_foreign(size: int = 5):
+    return await fetch_offerings(type=0, for_category=1, size=size)
+
+@app.get("/right-share")
+async def right_share(size: int = 5):
+    return await fetch_offerings(type=2, for_category=2, size=size)
+
+@app.get("/fpo")
+async def fpo(size: int = 5):
+    return await fetch_offerings(type=1, for_category=2, size=size)
+
+@app.get("/mutual-fund-offering")
+async def mutual_fund_offering(size: int = 5):
+    return await fetch_offerings(type=3, for_category=2, size=size)
+
+@app.get("/debenture-offering")
+async def debenture_offering(size: int = 5):
+    return await fetch_offerings(type=4, for_category=2, size=size)
+
+@app.get("/dividends")
+async def dividends(
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(10, ge=1, le=100, description="Items per page")
+):
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    params = {"page": page, "size": size}
+    
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(SHAREHUB_DIVIDEND_URL, params=params, headers=headers)
+        
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="Failed to fetch dividends")
     return resp.json()
 
 # -------------------------------------------------
